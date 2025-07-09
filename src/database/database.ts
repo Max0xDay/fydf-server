@@ -50,11 +50,11 @@ export async function verifyUser(username: string, password: string): Promise<bo
 }
 
 export async function initializeDefaultUser() {
-  if (db.query("SELECT COUNT(*) FROM users").flat()[0] === 0) {
+  const userCount = db.query("SELECT COUNT(*) FROM users").flat()[0] as number;
+  if (userCount === 0) {
+    console.log("Creating default user: penguin/penguin");
     await createUser("penguin", "penguin");
   } else {
-    db.query("DELETE FROM users");
-    db.query("DELETE FROM sessions");
-    await createUser("penguin", "penguin");
+    console.log("Database already has users, skipping default user creation");
   }
 }

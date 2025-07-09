@@ -13,6 +13,6 @@ export const config = {
   chunkSize: 1024 * 1024 * 5,
   maxFileSize: 1024 * 1024 * 1024 * 5,
   dbPath: "./fydf.db",
-  sessionDuration: 24 * 60 * 60 * 1000,
-  cleanupInterval: 60 * 60 * 1000,
+  sessionDuration: 7 * 24 * 60 * 60 * 1000, 
+  cleanupInterval: 60 * 60 * 1000, 
 };

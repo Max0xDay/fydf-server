@@ -1,15 +1,16 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { ensureDir } from "https://deno.land/std@0.224.0/fs/mod.ts";
-import { config } from "./src/utils/config.ts";
-import { initializeDatabase, initializeDefaultUser } from "./src/database/database.ts";
-import { cleanupExpiredSessions, getUserFromSession } from "./src/middleware/session.ts";
-import { serveStaticFile } from "./src/utils/static.ts";
-import { handleLogin, handleLogout } from "./src/routes/auth.ts";
-import { handleUpload, handleChunkedUpload, handleDownload, listFiles, handleDelete } from "./src/routes/files.ts";
+import { config } from "./utils/config.ts";
+import { initializeDatabase, initializeDefaultUser } from "./database/database.ts";
+import { cleanupExpiredSessions, getUserFromSession, loadSessionsFromDatabase } from "./middleware/session.ts";
+import { serveStaticFile } from "./utils/static.ts";
+import { handleLogin, handleLogout } from "./routes/auth.ts";
+import { handleUpload, handleChunkedUpload, handleDownload, listFiles, handleDelete } from "./routes/files.ts";
 
 async function initialize() {
   initializeDatabase();
   await initializeDefaultUser();
+  loadSessionsFromDatabase(); 
   cleanupExpiredSessions();
   setInterval(cleanupExpiredSessions, config.cleanupInterval);
   await ensureDir(config.storagePath);
