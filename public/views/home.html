@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FYDF - Fixing Your Duplicate Files</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body class="home-page">
+    <header>
+        <h1>FYDF</h1>
+        <div class="user-info">
+            <span id="currentUser"></span>
+            <button id="logoutBtn" class="logout-btn">Logout</button>
+        </div>
+    </header>
+
+    <main>
+        <div class="upload-section">
+            <div class="upload-area" id="uploadArea">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <p>Drag & drop files here or click to browse</p>
+                <p class="upload-info">Maximum file size: 5GB</p>
+                <input type="file" id="fileInput" multiple hidden>
+            </div>
+
+            <div id="uploadProgress" class="upload-progress" style="display: none;">
+                <div class="progress-item">
+                    <span class="filename"></span>
+                    <div class="progress-bar">
+                        <div class="progress-fill"></div>
+                    </div>
+                    <span class="progress-text">0%</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="files-section">
+            <h2>Your Files</h2>
+            <div id="filesList" class="files-list">
+                <div class="loading">Loading files...</div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/js/home.js"></script>
+</body>
+</html>

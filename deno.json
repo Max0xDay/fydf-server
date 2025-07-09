@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "lib": ["deno.window"],
+    "strict": true
+  },
+  "fmt": {
+    "files": {
+      "include": ["src/", "*.ts", "*.js"],
+      "exclude": ["node_modules/", ".git/"]
+    },
+    "options": {
+      "useTabs": false,
+      "lineWidth": 80,
+      "indentWidth": 2,
+      "singleQuote": false,
+      "proseWrap": "preserve"
+    }
+  },
+  "lint": {
+    "files": {
+      "include": ["src/", "*.ts", "*.js"],
+      "exclude": ["node_modules/", ".git/"]
+    },
+    "rules": {
+      "tags": ["recommended"]
+    }
+  },
+  "tasks": {
+    "start": "deno run --allow-net --allow-read --allow-write --allow-env server.ts",
+    "dev": "deno run --allow-net --allow-read --allow-write --allow-env --watch server.ts"
+  }
+}
