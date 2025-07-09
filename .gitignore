@@ -1,0 +1,12 @@
+/.vscode
+/deno.json
+/deno.lock
+/fydf.db
+/home.html
+/home.js
+/index.html.old
+/login.html
+/login.js
+/script.js.old
+/server.ts
+/styles.css
