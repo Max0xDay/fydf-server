@@ -44,22 +44,24 @@ A professional file management server built with Deno and TypeScript.
 ## Features
 
 - Secure session-based authentication
-- File upload with chunked transfer support
+- **Resumable file uploads** - Continue uploads after page reload or connection loss
+- Chunked transfer support for large files
 - File download and management
 - Responsive web interface
 - SQLite database storage
+- Automatic cleanup of expired upload sessions
 - Configurable storage locations
 
 ## Project Structure
 
 ```
 fydf-server/
-├── src/                    # Source code
-│   ├── database/          # Database utilities
-│   ├── middleware/        # Session management
-│   ├── routes/           # API endpoints
-│   └── utils/            # Configuration and utilities
-├── public/               # Static web assets
+├── src/                 # Source code
+│   ├── database/        # Database utilities
+│   ├── middleware/      # Session management
+│   ├── routes/          # API endpoints
+│   └── utils/           # Configuration and utilities
+├── public/              # Static web assets
 │   ├── css/             # Stylesheets
 │   ├── js/              # Client-side JavaScript
 │   └── views/           # HTML templates
@@ -138,4 +140,26 @@ If you prefer manual setup:
 - Run `./setup.sh` to reconfigure storage
 - Check that .env file has correct path
 - Verify directory permissions with `ls -la /path/to/storage`
+
+## Resumable Uploads
+
+The application supports resumable uploads that can continue even after:
+- Page reload
+- Browser restart
+- Network interruption
+- Connection timeout
+
+### How it works:
+1. **Upload interruption**: If an upload is interrupted, the progress is saved
+2. **Page reload**: When you return, incomplete uploads are automatically detected
+3. **File selection**: You'll be prompted to re-select the same file to continue
+4. **Resume**: Upload continues from where it left off, skipping already uploaded chunks
+
+### Resume process:
+- Incomplete uploads appear in a "Resume Incomplete Uploads" section
+- Click "Resume Upload" and select the same file
+- Upload continues automatically from the last completed chunk
+- Progress is preserved and displayed accurately
+
+This feature is especially useful for large files or unstable connections.
 

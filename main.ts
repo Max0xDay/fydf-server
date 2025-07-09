@@ -5,13 +5,15 @@ import { initializeDatabase, initializeDefaultUser } from "./src/database/databa
 import { cleanupExpiredSessions, getUserFromSession } from "./src/middleware/session.ts";
 import { serveStaticFile } from "./src/utils/static.ts";
 import { handleLogin, handleLogout } from "./src/routes/auth.ts";
-import { handleUpload, handleChunkedUpload, handleDownload, listFiles, handleDelete } from "./src/routes/files.ts";
+import { handleUpload, handleChunkedUpload, handleDownload, listFiles, handleDelete, handleUploadInit, handleUploadStatus, handleResumableChunkUpload, cleanupExpiredSessions as cleanupExpiredUploadSessions } from "./src/routes/files.ts";
 
 async function initialize() {
   initializeDatabase();
   await initializeDefaultUser();
   cleanupExpiredSessions();
+  cleanupExpiredUploadSessions();
   setInterval(cleanupExpiredSessions, config.cleanupInterval);
+  setInterval(cleanupExpiredUploadSessions, config.cleanupInterval);
   
   try {
     await ensureDir(config.storagePath);
@@ -80,6 +82,15 @@ async function handler(req: Request): Promise<Response> {
       break;
     case "/api/upload-chunk":
       if (req.method === "POST") return await handleChunkedUpload(req);
+      break;
+    case "/api/upload-init":
+      if (req.method === "POST") return await handleUploadInit(req);
+      break;
+    case "/api/upload-status":
+      if (req.method === "GET") return handleUploadStatus(req);
+      break;
+    case "/api/upload-resumable":
+      if (req.method === "POST") return await handleResumableChunkUpload(req);
       break;
     case "/api/download":
       if (req.method === "GET") return await handleDownload(req);

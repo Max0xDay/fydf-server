@@ -158,3 +158,173 @@ export async function handleDelete(req: Request): Promise<Response> {
     return new Response("File not found", { status: 404 });
   }
 }
+
+interface UploadSession {
+  id: string;
+  filename: string;
+  totalSize: number;
+  totalChunks: number;
+  uploadedChunks: Set<number>;
+  created: number;
+  lastActivity: number;
+  userId: string;
+}
+
+const uploadSessions = new Map<string, UploadSession>();
+
+export function handleUploadStatus(req: Request): Response {
+  const user = getUserFromSession(req);
+  if (!user) return new Response("Unauthorized", { status: 401 });
+
+  const url = new URL(req.url);
+  const sessionId = url.searchParams.get("sessionId");
+  
+  if (!sessionId) {
+    return new Response("Missing sessionId", { status: 400 });
+  }
+
+  const session = uploadSessions.get(sessionId);
+  if (!session || session.userId !== user.userId) {
+    return new Response("Session not found", { status: 404 });
+  }
+
+  return new Response(JSON.stringify({
+    sessionId: session.id,
+    filename: session.filename,
+    totalChunks: session.totalChunks,
+    uploadedChunks: Array.from(session.uploadedChunks),
+    progress: (session.uploadedChunks.size / session.totalChunks) * 100
+  }), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+export async function handleUploadInit(req: Request): Promise<Response> {
+  const user = getUserFromSession(req);
+  if (!user) return new Response("Unauthorized", { status: 401 });
+
+  const body = await req.json();
+  const { filename, totalSize, chunkSize } = body;
+
+  if (!filename || !totalSize || !chunkSize) {
+    return new Response("Missing required fields", { status: 400 });
+  }
+
+  const sessionId = crypto.randomUUID();
+  const totalChunks = Math.ceil(totalSize / chunkSize);
+  
+  const userDir = join(config.storagePath, user.userId);
+  await ensureDir(userDir);
+  
+  const tempDir = join(userDir, ".temp");
+  await ensureDir(tempDir);
+
+  const session: UploadSession = {
+    id: sessionId,
+    filename,
+    totalSize,
+    totalChunks,
+    uploadedChunks: new Set(),
+    created: Date.now(),
+    lastActivity: Date.now(),
+    userId: user.userId
+  };
+
+  uploadSessions.set(sessionId, session);
+
+  return new Response(JSON.stringify({
+    sessionId,
+    totalChunks,
+    existingChunks: []
+  }), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+export async function handleResumableChunkUpload(req: Request): Promise<Response> {
+  const user = getUserFromSession(req);
+  if (!user) return new Response("Unauthorized", { status: 401 });
+
+  const url = new URL(req.url);
+  const sessionId = url.searchParams.get("sessionId");
+  const chunkIndex = url.searchParams.get("chunkIndex");
+
+  if (!sessionId || chunkIndex === null) {
+    return new Response("Missing required parameters", { status: 400 });
+  }
+
+  const session = uploadSessions.get(sessionId);
+  if (!session || session.userId !== user.userId) {
+    return new Response("Session not found", { status: 404 });
+  }
+
+  const chunkNum = parseInt(chunkIndex);
+  if (chunkNum < 0 || chunkNum >= session.totalChunks) {
+    return new Response("Invalid chunk index", { status: 400 });
+  }
+
+  const userDir = join(config.storagePath, user.userId);
+  const tempDir = join(userDir, ".temp");
+  const chunkPath = join(tempDir, `${sessionId}.chunk${chunkNum}`);
+
+  try {
+    const body = await req.arrayBuffer();
+    await Deno.writeFile(chunkPath, new Uint8Array(body));
+    
+    session.uploadedChunks.add(chunkNum);
+    session.lastActivity = Date.now();
+
+    const isComplete = session.uploadedChunks.size === session.totalChunks;
+    
+    if (isComplete) {
+      await assembleFile(session, userDir, tempDir);
+      uploadSessions.delete(sessionId);
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      complete: isComplete,
+      progress: (session.uploadedChunks.size / session.totalChunks) * 100
+    }), {
+      headers: { "content-type": "application/json" },
+    });
+  } catch (error) {
+    console.error("Chunk upload error:", error);
+    return new Response("Chunk upload failed", { status: 500 });
+  }
+}
+
+async function assembleFile(session: UploadSession, userDir: string, tempDir: string) {
+  const finalPath = join(userDir, session.filename);
+  const file = await Deno.create(finalPath);
+
+  try {
+    for (let i = 0; i < session.totalChunks; i++) {
+      const chunkPath = join(tempDir, `${session.id}.chunk${i}`);
+      const chunkData = await Deno.readFile(chunkPath);
+      await file.write(chunkData);
+      await Deno.remove(chunkPath);
+    }
+  } finally {
+    file.close();
+  }
+}
+
+export function cleanupExpiredSessions() {
+  const now = Date.now();
+  const maxAge = 24 * 60 * 60 * 1000;
+
+  for (const [sessionId, session] of uploadSessions.entries()) {
+    if (now - session.lastActivity > maxAge) {
+      uploadSessions.delete(sessionId);
+      
+      const userDir = join(config.storagePath, session.userId);
+      const tempDir = join(userDir, ".temp");
+      
+      for (let i = 0; i < session.totalChunks; i++) {
+        const chunkPath = join(tempDir, `${sessionId}.chunk${i}`);
+        Deno.remove(chunkPath).catch(() => {});
+      }
+    }
+  }
+}

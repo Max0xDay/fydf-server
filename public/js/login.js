@@ -12,8 +12,7 @@ async function checkAuth() {
         if (response.ok) {
             window.location.href = '/home';
         }
-    } catch (error) {
-    }
+    } catch (error) {}
 }
 
 async function handleLogin(e) {

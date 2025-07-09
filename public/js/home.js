@@ -11,11 +11,180 @@ const uploadProgress = document.getElementById('uploadProgress');
 let currentUser = null;
 let uploadQueue = [];
 let activeUploads = 0;
+let activeUploadSessions = new Map();
 
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth();
     setupEventListeners();
+    checkForIncompleteUploads();
+    
+    window.promptForResumeFile = promptForResumeFile;
+    window.discardIncompleteUpload = discardIncompleteUpload;
+    window.downloadFile = downloadFile;
+    window.deleteFile = deleteFile;
 });
+
+async function checkForIncompleteUploads() {
+    const savedSessions = JSON.parse(localStorage.getItem('uploadSessions') || '{}');
+    const incompleteUploads = [];
+    
+    for (const [filename, sessionData] of Object.entries(savedSessions)) {
+        try {
+            const statusResponse = await fetch(`/api/upload-status?sessionId=${sessionData.sessionId}`);
+            if (statusResponse.ok) {
+                const status = await statusResponse.json();
+                if (status.progress < 100) {
+                    incompleteUploads.push({
+                        filename: filename,
+                        progress: Math.round(status.progress),
+                        sessionData: sessionData
+                    });
+                } else {
+                    delete savedSessions[filename];
+                }
+            } else {
+                delete savedSessions[filename];
+            }
+        } catch (error) {
+            console.error('Error checking upload status:', error);
+            delete savedSessions[filename];
+        }
+    }
+    
+    localStorage.setItem('uploadSessions', JSON.stringify(savedSessions));
+    
+    displayIncompleteUploads(incompleteUploads);
+}
+
+function displayIncompleteUploads(incompleteUploads) {
+    const resumeSection = document.getElementById('resumeSection');
+    const incompleteUploadsContainer = document.getElementById('incompleteUploads');
+    
+    if (incompleteUploads.length === 0) {
+        resumeSection.style.display = 'none';
+        return;
+    }
+    
+    resumeSection.style.display = 'block';
+    incompleteUploadsContainer.innerHTML = '';
+    
+    incompleteUploads.forEach(upload => {
+        const item = document.createElement('div');
+        item.className = 'incomplete-upload-item';
+        item.innerHTML = `
+            <div class="incomplete-upload-info">
+                <div class="incomplete-upload-name">${upload.filename}</div>
+                <div class="incomplete-upload-progress">${upload.progress}% complete</div>
+            </div>
+            <div>
+                <button class="resume-upload-btn" onclick="promptForResumeFile('${upload.filename}', ${JSON.stringify(upload.sessionData).replace(/"/g, '&quot;')})">
+                    Resume Upload
+                </button>
+                <button class="discard-upload-btn" onclick="discardIncompleteUpload('${upload.filename}')">
+                    Discard
+                </button>
+            </div>
+        `;
+        incompleteUploadsContainer.appendChild(item);
+    });
+}
+
+function promptForResumeFile(filename, sessionData) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '*/*';
+    input.onchange = (e) => {
+        const file = e.target.files[0];
+        if (file && file.name === filename) {
+            resumeUploadWithFile(filename, sessionData, file);
+        } else if (file) {
+            alert(`Please select the same file: ${filename}\nYou selected: ${file.name}`);
+        } else {
+            console.log('No file selected');
+        }
+    };
+    input.click();
+}
+
+async function resumeUploadWithFile(filename, sessionData, file) {
+    try {
+        activeUploads++;
+        
+        const resumeSection = document.getElementById('resumeSection');
+        const items = resumeSection.querySelectorAll('.incomplete-upload-item');
+        items.forEach(item => {
+            const nameEl = item.querySelector('.incomplete-upload-name');
+            if (nameEl && nameEl.textContent === filename) {
+                item.style.display = 'none';
+            }
+        });
+        
+        activeUploadSessions.set(filename, { ...sessionData, file });
+        
+        const statusResponse = await fetch(`/api/upload-status?sessionId=${sessionData.sessionId}`);
+        if (!statusResponse.ok) throw new Error('Failed to get upload status');
+
+        const status = await statusResponse.json();
+        const uploadedChunks = new Set(status.uploadedChunks);
+        
+        const progressItem = createProgressItem(filename);
+        uploadProgress.style.display = 'block';
+        updateProgress(progressItem, status.progress);
+
+        for (let i = 0; i < sessionData.totalChunks; i++) {
+            if (uploadedChunks.has(i)) continue;
+
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
+            
+            const response = await fetch(`/api/upload-resumable?sessionId=${sessionData.sessionId}&chunkIndex=${i}`, {
+                method: 'POST',
+                body: chunk
+            });
+            
+            if (!response.ok) throw new Error(`Chunk ${i} upload failed`);
+            
+            const result = await response.json();
+            updateProgress(progressItem, result.progress);
+            
+            if (result.complete) break;
+        }
+
+        activeUploadSessions.delete(filename);
+        
+        const savedSessions = JSON.parse(localStorage.getItem('uploadSessions') || '{}');
+        delete savedSessions[filename];
+        localStorage.setItem('uploadSessions', JSON.stringify(savedSessions));
+        
+        setTimeout(() => {
+            progressItem.remove();
+            if (uploadProgress.children.length === 0) {
+                uploadProgress.style.display = 'none';
+            }
+        }, 1000);
+
+        loadFiles();
+        checkForIncompleteUploads();
+    } catch (error) {
+        console.error('Resume upload failed:', error);
+        alert(`Failed to resume upload: ${error.message}`);
+        activeUploadSessions.delete(filename);
+    } finally {
+        activeUploads--;
+        processUploadQueue();
+    }
+}
+
+function discardIncompleteUpload(filename) {
+    if (confirm(`Are you sure you want to discard the incomplete upload for ${filename}?`)) {
+        const savedSessions = JSON.parse(localStorage.getItem('uploadSessions') || '{}');
+        delete savedSessions[filename];
+        localStorage.setItem('uploadSessions', JSON.stringify(savedSessions));
+        
+        checkForIncompleteUploads();
+    }
+}
 
 function setupEventListeners() {
     logoutBtn.addEventListener('click', handleLogout);
@@ -135,34 +304,120 @@ async function uploadFileSimple(file) {
 }
 
 async function uploadFileChunked(file) {
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const progressItem = createProgressItem(file.name);
     uploadProgress.style.display = 'block';
     
-    for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunk = file.slice(start, end);
-        
-        const response = await fetch(`/api/upload-chunk?filename=${encodeURIComponent(file.name)}&chunk=${i}&totalChunks=${totalChunks}`, {
+    try {
+        const sessionResponse = await fetch('/api/upload-init', {
             method: 'POST',
-            body: chunk
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filename: file.name,
+                totalSize: file.size,
+                chunkSize: CHUNK_SIZE
+            })
         });
+
+        if (!sessionResponse.ok) throw new Error('Failed to initialize upload');
         
-        if (!response.ok) throw new Error('Chunk upload failed');
+        const { sessionId, totalChunks } = await sessionResponse.json();
+        const sessionData = { sessionId, totalChunks, file };
+        activeUploadSessions.set(file.name, sessionData);
         
-        const progress = ((i + 1) / totalChunks) * 100;
-        updateProgress(progressItem, progress);
-    }
-    
-    setTimeout(() => {
-        progressItem.remove();
-        if (uploadProgress.children.length === 0) {
-            uploadProgress.style.display = 'none';
+        const savedSessions = JSON.parse(localStorage.getItem('uploadSessions') || '{}');
+        savedSessions[file.name] = { sessionId, totalChunks };
+        localStorage.setItem('uploadSessions', JSON.stringify(savedSessions));
+
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
+            
+            const response = await fetch(`/api/upload-resumable?sessionId=${sessionId}&chunkIndex=${i}`, {
+                method: 'POST',
+                body: chunk
+            });
+            
+            if (!response.ok) throw new Error(`Chunk ${i} upload failed`);
+            
+            const result = await response.json();
+            updateProgress(progressItem, result.progress);
+            
+            if (result.complete) break;
         }
-    }, 1000);
-    
-    loadFiles();
+
+        activeUploadSessions.delete(file.name);
+        
+        const completedSessions = JSON.parse(localStorage.getItem('uploadSessions') || '{}');
+        delete completedSessions[file.name];
+        localStorage.setItem('uploadSessions', JSON.stringify(completedSessions));
+        
+        setTimeout(() => {
+            progressItem.remove();
+            if (uploadProgress.children.length === 0) {
+                uploadProgress.style.display = 'none';
+            }
+        }, 1000);
+
+        loadFiles();
+    } catch (error) {
+        progressItem.remove();
+        activeUploadSessions.delete(file.name);
+        throw error;
+    }
+}
+
+async function resumeUpload(filename) {
+    const session = activeUploadSessions.get(filename);
+    if (!session) return false;
+
+    try {
+        const statusResponse = await fetch(`/api/upload-status?sessionId=${session.sessionId}`);
+        if (!statusResponse.ok) return false;
+
+        const status = await statusResponse.json();
+        const uploadedChunks = new Set(status.uploadedChunks);
+        
+        const progressItem = createProgressItem(filename);
+        uploadProgress.style.display = 'block';
+        updateProgress(progressItem, status.progress);
+
+        for (let i = 0; i < session.totalChunks; i++) {
+            if (uploadedChunks.has(i)) continue;
+
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, session.file.size);
+            const chunk = session.file.slice(start, end);
+            
+            const response = await fetch(`/api/upload-resumable?sessionId=${session.sessionId}&chunkIndex=${i}`, {
+                method: 'POST',
+                body: chunk
+            });
+            
+            if (!response.ok) throw new Error(`Chunk ${i} upload failed`);
+            
+            const result = await response.json();
+            updateProgress(progressItem, result.progress);
+            
+            if (result.complete) break;
+        }
+
+        activeUploadSessions.delete(filename);
+        
+        setTimeout(() => {
+            progressItem.remove();
+            if (uploadProgress.children.length === 0) {
+                uploadProgress.style.display = 'none';
+            }
+        }, 1000);
+
+        loadFiles();
+        return true;
+    } catch (error) {
+        console.error('Resume upload failed:', error);
+        activeUploadSessions.delete(filename);
+        return false;
+    }
 }
 
 function createProgressItem(filename) {

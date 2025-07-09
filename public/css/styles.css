@@ -364,6 +364,84 @@ main {
     opacity: 0.5;
 }
 
+.resume-section {
+    margin-top: 2rem;
+    padding: 1.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.resume-section h3 {
+    margin: 0 0 1rem 0;
+    color: var(--text);
+    font-size: 1.125rem;
+}
+
+.incomplete-uploads {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.incomplete-upload-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.incomplete-upload-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.incomplete-upload-name {
+    font-weight: 500;
+    color: var(--text);
+}
+
+.incomplete-upload-progress {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.resume-upload-btn {
+    padding: 0.5rem 1rem;
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: all 0.3s;
+}
+
+.resume-upload-btn:hover {
+    background: var(--primary-dark);
+}
+
+.discard-upload-btn {
+    padding: 0.5rem 1rem;
+    background: transparent;
+    color: var(--error);
+    border: 1px solid var(--error);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    margin-left: 0.5rem;
+    transition: all 0.3s;
+}
+
+.discard-upload-btn:hover {
+    background: var(--error);
+    color: white;
+}
+
 @media (max-width: 768px) {
     header {
         padding: 1rem;
@@ -388,5 +466,4 @@ main {
         justify-content: flex-end;
     }
 }
-
 }
