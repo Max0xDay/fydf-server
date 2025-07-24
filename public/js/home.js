@@ -15,13 +15,13 @@ let currentUser = null;
 let uploadQueue = [];
 let activeUploads = 0;
 let activeUploadSessions = new Map();
-let networkStats = {
+const networkStats = {
     latency: 0,
-    downloadSpeed: 0,
+    bandwidth: 0,
     uploadSpeed: 0,
     dataSent: 0,
     dataReceived: 0,
-    connectionType: 'unknown'
+    connectionQuality: 'unknown'
 };
 let transferMetrics = new Map();
 
@@ -37,20 +37,43 @@ document.addEventListener('DOMContentLoaded', () => {
     globalThis.deleteFile = deleteFile;
 });
 
-async function initializeNetworkMonitoring() {
-    updateConnectionType();
+function initializeNetworkMonitoring() {
     startLatencyMonitoring();
+    startBandwidthTesting();
     startStatsUpdates();
     updateNetworkDisplay();
 }
 
-function updateConnectionType() {
-    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-    if (connection) {
-        networkStats.connectionType = connection.effectiveType || connection.type || 'unknown';
-    } else {
-        networkStats.connectionType = 'unknown';
+async function measureBandwidth() {
+    try {
+        const testSize = 100 * 1024;
+        const testData = new Uint8Array(testSize);
+        
+        const startTime = performance.now();
+        const response = await fetch('/api/ping', {
+            method: 'POST',
+            body: testData,
+            cache: 'no-cache'
+        });
+        
+        if (response.ok) {
+            const endTime = performance.now();
+            const duration = (endTime - startTime) / 1000;
+            const speedBps = testSize / duration;
+            const speedMbps = (speedBps * 8) / (1024 * 1024);
+            
+            networkStats.bandwidth = speedMbps;
+            networkStats.dataReceived += testSize;
+            networkStats.dataSent += testSize;
+        }
+    } catch {
+        networkStats.bandwidth = 0;
     }
+}
+
+function startBandwidthTesting() {
+    measureBandwidth();
+    setInterval(measureBandwidth, 30000);
 }
 
 async function measureLatency() {
@@ -79,10 +102,10 @@ function startStatsUpdates() {
 }
 
 function updateNetworkDisplay() {
-    document.getElementById('connectionType').textContent = networkStats.connectionType.toUpperCase();
+    document.getElementById('connectionQuality').textContent = getConnectionQuality();
     document.getElementById('latency').textContent = `${networkStats.latency} ms`;
-    document.getElementById('downloadSpeed').textContent = `${networkStats.downloadSpeed.toFixed(1)} Mbps`;
-    document.getElementById('uploadSpeed').textContent = `${networkStats.uploadSpeed.toFixed(1)} Mbps`;
+    document.getElementById('bandwidthTest').textContent = `${networkStats.bandwidth.toFixed(1)} Mbps`;
+    document.getElementById('uploadSpeed').textContent = `${networkStats.uploadSpeed.toFixed(1)} MB/s`;
     document.getElementById('dataSent').textContent = formatFileSize(networkStats.dataSent);
     document.getElementById('dataReceived').textContent = formatFileSize(networkStats.dataReceived);
     
@@ -93,10 +116,10 @@ function updateNetworkDisplay() {
     let status = 'poor';
     let statusMessage = 'Poor Connection';
     
-    if (networkStats.latency > 0 && networkStats.latency < 50) {
+    if (networkStats.latency > 0 && networkStats.latency < 50 && networkStats.bandwidth > 10) {
         status = 'excellent';
         statusMessage = 'Excellent Connection';
-    } else if (networkStats.latency < 150) {
+    } else if (networkStats.latency < 150 && networkStats.bandwidth > 1) {
         status = 'good';
         statusMessage = 'Good Connection';
     }
@@ -105,7 +128,20 @@ function updateNetworkDisplay() {
     statusText.textContent = statusMessage;
 }
 
-function calculateTransferSpeed(filename, bytesTransferred, timeElapsed) {
+function getConnectionQuality() {
+    if (networkStats.latency === 0) return 'Testing...';
+    
+    const latencyScore = networkStats.latency < 50 ? 3 : networkStats.latency < 150 ? 2 : 1;
+    const bandwidthScore = networkStats.bandwidth > 10 ? 3 : networkStats.bandwidth > 1 ? 2 : 1;
+    const totalScore = (latencyScore + bandwidthScore) / 2;
+    
+    if (totalScore >= 2.5) return 'Excellent';
+    if (totalScore >= 2) return 'Good';
+    if (totalScore >= 1.5) return 'Fair';
+    return 'Poor';
+}
+
+function calculateTransferSpeed(filename, bytesTransferred, _timeElapsed) {
     if (!transferMetrics.has(filename)) {
         transferMetrics.set(filename, {
             startTime: Date.now(),
@@ -134,7 +170,7 @@ function calculateTransferSpeed(filename, bytesTransferred, timeElapsed) {
         metrics.lastUpdate = now;
         metrics.totalBytes = bytesTransferred;
         
-        networkStats.uploadSpeed = (avgSpeed * 8) / (1024 * 1024);
+        networkStats.uploadSpeed = avgSpeed / (1024 * 1024);
         
         return avgSpeed;
     }

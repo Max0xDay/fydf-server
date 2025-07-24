@@ -107,6 +107,16 @@ async function handler(req: Request): Promise<Response> {
             ...corsHeaders
           }
         });
+      } else if (req.method === "POST") {
+        const body = await req.arrayBuffer();
+        return new Response("pong", {
+          status: 200,
+          headers: { 
+            "content-type": "text/plain",
+            "x-received-bytes": body.byteLength.toString(),
+            ...corsHeaders
+          }
+        });
       }
       break;
     case "/api/delete":
