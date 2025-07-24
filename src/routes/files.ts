@@ -45,46 +45,77 @@ export async function handleChunkedUpload(req: Request): Promise<Response> {
   if (!user) return new Response("Unauthorized", { status: 401 });
 
   const url = new URL(req.url);
-  const filename = url.searchParams.get("filename");
-  const chunk = url.searchParams.get("chunk");
-  const totalChunks = url.searchParams.get("totalChunks");
+  const sessionId = url.searchParams.get("sessionId");
+  const chunkIndex = url.searchParams.get("chunkIndex");
+  const chunkSize = url.searchParams.get("chunkSize");
 
-  if (!filename || chunk === null || !totalChunks) {
+  if (!sessionId || chunkIndex === null || !chunkSize) {
     return new Response("Bad Request", { status: 400 });
+  }
+
+  const session = uploadSessions.get(sessionId);
+  if (!session || session.userId !== user.userId) {
+    return new Response("Session not found", { status: 404 });
+  }
+
+  const chunkNum = parseInt(chunkIndex);
+  const chunkSizeNum = parseInt(chunkSize);
+  
+  if (chunkNum < 0 || chunkNum >= session.totalChunks) {
+    return new Response("Invalid chunk index", { status: 400 });
   }
 
   const userDir = join(config.storagePath, user.userId);
   await ensureDir(userDir);
 
-  const tempDir = join(userDir, ".temp");
-  await ensureDir(tempDir);
-
-  const chunkPath = join(tempDir, `${filename}.chunk${chunk}`);
-  const body = await req.arrayBuffer();
-  await Deno.writeFile(chunkPath, new Uint8Array(body));
-
-  const chunkNum = parseInt(chunk);
-  const totalNum = parseInt(totalChunks);
-
-  if (chunkNum === totalNum - 1) {
-    const finalPath = join(userDir, filename);
-    const file = await Deno.create(finalPath);
-
-    for (let i = 0; i < totalNum; i++) {
-      const chunkData = await Deno.readFile(join(tempDir, `${filename}.chunk${i}`));
-      await file.write(chunkData);
-      await Deno.remove(join(tempDir, `${filename}.chunk${i}`));
+  const tempFilePath = join(userDir, `.tmp.${session.filename}`);
+  
+  try {
+    const file = await Deno.open(tempFilePath, { 
+      read: true, 
+      write: true, 
+      create: true 
+    });
+    
+    const offset = chunkNum * chunkSizeNum;
+    await file.seek(offset, Deno.SeekMode.Start);
+    
+    const reader = req.body?.getReader();
+    if (!reader) {
+      file.close();
+      throw new Error("No request body");
     }
 
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await file.write(value);
+    }
+    
     file.close();
-    return new Response(JSON.stringify({ success: true, complete: true }), {
+    
+    session.uploadedChunks.add(chunkNum);
+    session.lastActivity = Date.now();
+
+    const isComplete = session.uploadedChunks.size === session.totalChunks;
+    
+    if (isComplete) {
+      const finalPath = join(userDir, session.filename);
+      await Deno.rename(tempFilePath, finalPath);
+      uploadSessions.delete(sessionId);
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      complete: isComplete,
+      progress: (session.uploadedChunks.size / session.totalChunks) * 100
+    }), {
       headers: { "content-type": "application/json" },
     });
+  } catch (error) {
+    console.error("Chunk upload error:", error);
+    return new Response("Chunk upload failed", { status: 500 });
   }
-
-  return new Response(JSON.stringify({ success: true, complete: false }), {
-    headers: { "content-type": "application/json" },
-  });
 }
 
 export async function handleDownload(req: Request): Promise<Response> {
@@ -101,14 +132,46 @@ export async function handleDownload(req: Request): Promise<Response> {
     const file = await Deno.open(filePath, { read: true });
     const stat = await file.stat();
     
+    
+    const range = req.headers.get("range");
+    let start = 0;
+    let end = stat.size - 1;
+    let status = 200;
+    
+    if (range) {
+      ///b   (d+)-(d*)
+      const matches = range.match(/bytes=(\d+)-(\d*)/);
+
+      if (matches) {
+        start = parseInt(matches[1]);
+        if (matches[2]) {
+          end = parseInt(matches[2]);
+        }
+
+
+        status = 206; 
+       
+        await file.seek(start, 0);
+      }
+    }
+    
+    const contentLength = end - start + 1;
     const stream = file.readable;
     
+    const headers: Record<string, string> = {
+      "content-type": "application/octet-stream",
+      "content-disposition": `attachment; filename="${filename}"`,
+      "content-length": contentLength.toString(),
+      "accept-ranges": "bytes",
+    };
+    
+    if (status === 206) {
+      headers["content-range"] = `bytes ${start}-${end}/${stat.size}`;
+    }
+    
     return new Response(stream, {
-      headers: {
-        "content-type": "application/octet-stream",
-        "content-disposition": `attachment; filename="${filename}"`,
-        "content-length": stat.size.toString(),
-      },
+      status,
+      headers,
     });
   } catch {
     return new Response("File not found", { status: 404 });
@@ -215,16 +278,31 @@ export async function handleUploadInit(req: Request): Promise<Response> {
   
   const userDir = join(config.storagePath, user.userId);
   await ensureDir(userDir);
+
+  const tempFilePath = join(userDir, `.tmp.${filename}`);
   
-  const tempDir = join(userDir, ".temp");
-  await ensureDir(tempDir);
+  const existingChunks = [];
+  try {
+    const tempFile = await Deno.open(tempFilePath, { read: true });
+    const stat = await tempFile.stat();
+    tempFile.close();
+    
+    for (let i = 0; i < totalChunks; i++) {
+      const expectedOffset = i * chunkSize;
+      if (expectedOffset < stat.size) {
+        existingChunks.push(i);
+      }
+    }
+  } catch {
+    //fnf
+  }
 
   const session: UploadSession = {
     id: sessionId,
     filename,
     totalSize,
     totalChunks,
-    uploadedChunks: new Set(),
+    uploadedChunks: new Set(existingChunks),
     created: Date.now(),
     lastActivity: Date.now(),
     userId: user.userId
@@ -235,7 +313,7 @@ export async function handleUploadInit(req: Request): Promise<Response> {
   return new Response(JSON.stringify({
     sessionId,
     totalChunks,
-    existingChunks: []
+    existingChunks
   }), {
     headers: { "content-type": "application/json" },
   });
@@ -264,12 +342,32 @@ export async function handleResumableChunkUpload(req: Request): Promise<Response
   }
 
   const userDir = join(config.storagePath, user.userId);
-  const tempDir = join(userDir, ".temp");
-  const chunkPath = join(tempDir, `${sessionId}.chunk${chunkNum}`);
+  const tempFilePath = join(userDir, `.tmp.${session.filename}`);
+  const chunkSize = Math.ceil(session.totalSize / session.totalChunks);
 
   try {
-    const body = await req.arrayBuffer();
-    await Deno.writeFile(chunkPath, new Uint8Array(body));
+    const file = await Deno.open(tempFilePath, { 
+      read: true, 
+      write: true, 
+      create: true 
+    });
+    
+    const offset = chunkNum * chunkSize;
+    await file.seek(offset, Deno.SeekMode.Start);
+    
+    const reader = req.body?.getReader();
+    if (!reader) {
+      file.close();
+      throw new Error("No request body");
+    }
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await file.write(value);
+    }
+    
+    file.close();
     
     session.uploadedChunks.add(chunkNum);
     session.lastActivity = Date.now();
@@ -277,7 +375,8 @@ export async function handleResumableChunkUpload(req: Request): Promise<Response
     const isComplete = session.uploadedChunks.size === session.totalChunks;
     
     if (isComplete) {
-      await assembleFile(session, userDir, tempDir);
+      const finalPath = join(userDir, session.filename);
+      await Deno.rename(tempFilePath, finalPath);
       uploadSessions.delete(sessionId);
     }
 
@@ -294,22 +393,6 @@ export async function handleResumableChunkUpload(req: Request): Promise<Response
   }
 }
 
-async function assembleFile(session: UploadSession, userDir: string, tempDir: string) {
-  const finalPath = join(userDir, session.filename);
-  const file = await Deno.create(finalPath);
-
-  try {
-    for (let i = 0; i < session.totalChunks; i++) {
-      const chunkPath = join(tempDir, `${session.id}.chunk${i}`);
-      const chunkData = await Deno.readFile(chunkPath);
-      await file.write(chunkData);
-      await Deno.remove(chunkPath);
-    }
-  } finally {
-    file.close();
-  }
-}
-
 export function cleanupExpiredSessions() {
   const now = Date.now();
   const maxAge = 24 * 60 * 60 * 1000;
@@ -319,12 +402,9 @@ export function cleanupExpiredSessions() {
       uploadSessions.delete(sessionId);
       
       const userDir = join(config.storagePath, session.userId);
-      const tempDir = join(userDir, ".temp");
+      const tempFilePath = join(userDir, `.tmp.${session.filename}`);
       
-      for (let i = 0; i < session.totalChunks; i++) {
-        const chunkPath = join(tempDir, `${sessionId}.chunk${i}`);
-        Deno.remove(chunkPath).catch(() => {});
-      }
+      Deno.remove(tempFilePath).catch(() => {});
     }
   }
 }
