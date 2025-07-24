@@ -98,6 +98,17 @@ async function handler(req: Request): Promise<Response> {
     case "/api/files":
       if (req.method === "GET") return await listFiles(req);
       break;
+    case "/api/ping":
+      if (req.method === "HEAD" || req.method === "GET") {
+        return new Response("pong", {
+          status: 200,
+          headers: { 
+            "content-type": "text/plain",
+            ...corsHeaders
+          }
+        });
+      }
+      break;
     case "/api/delete":
       if (req.method === "DELETE") return await handleDelete(req);
       break;

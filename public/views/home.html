@@ -16,6 +16,44 @@
     </header>
 
     <main>
+        <div class="network-stats-section">
+            <div class="network-stats-panel">
+                <div class="stats-header">
+                    <h3>Network Statistics</h3>
+                    <div class="connection-status" id="connectionStatus">
+                        <div class="status-indicator"></div>
+                        <span>Checking...</span>
+                    </div>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">Connection Type</div>
+                        <div class="stat-value" id="connectionType">Unknown</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Latency</div>
+                        <div class="stat-value" id="latency">-- ms</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Download Speed</div>
+                        <div class="stat-value" id="downloadSpeed">-- Mbps</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Upload Speed</div>
+                        <div class="stat-value" id="uploadSpeed">-- Mbps</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Data Sent</div>
+                        <div class="stat-value" id="dataSent">0 B</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Data Received</div>
+                        <div class="stat-value" id="dataReceived">0 B</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="upload-section">
             <div class="upload-area" id="uploadArea">
                 <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -30,11 +68,22 @@
 
             <div id="uploadProgress" class="upload-progress" style="display: none;">
                 <div class="progress-item">
-                    <span class="filename"></span>
+                    <div class="progress-header">
+                        <span class="filename"></span>
+                        <span class="transfer-stats">
+                            <span class="transfer-speed">0 MB/s</span>
+                            <span class="eta">ETA: --</span>
+                        </span>
+                    </div>
                     <div class="progress-bar">
                         <div class="progress-fill"></div>
                     </div>
-                    <span class="progress-text">0%</span>
+                    <div class="progress-footer">
+                        <span class="progress-text">0%</span>
+                        <span class="transfer-details">
+                            <span class="transferred">0 B</span> / <span class="total-size">0 B</span>
+                        </span>
+                    </div>
                 </div>
             </div>
 

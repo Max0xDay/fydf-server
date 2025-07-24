@@ -1,5 +1,8 @@
 const CHUNK_SIZE = 5 * 1024 * 1024;
 const MAX_CONCURRENT_UPLOADS = 3;
+const SPEED_CALCULATION_WINDOW = 5000;
+const LATENCY_CHECK_INTERVAL = 10000;
+const STATS_UPDATE_INTERVAL = 1000;
 
 const fileInput = document.getElementById('fileInput');
 const uploadArea = document.getElementById('uploadArea');
@@ -12,17 +15,132 @@ let currentUser = null;
 let uploadQueue = [];
 let activeUploads = 0;
 let activeUploadSessions = new Map();
+let networkStats = {
+    latency: 0,
+    downloadSpeed: 0,
+    uploadSpeed: 0,
+    dataSent: 0,
+    dataReceived: 0,
+    connectionType: 'unknown'
+};
+let transferMetrics = new Map();
 
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth();
     setupEventListeners();
     checkForIncompleteUploads();
+    initializeNetworkMonitoring();
     
-    window.promptForResumeFile = promptForResumeFile;
-    window.discardIncompleteUpload = discardIncompleteUpload;
-    window.downloadFile = downloadFile;
-    window.deleteFile = deleteFile;
+    globalThis.promptForResumeFile = promptForResumeFile;
+    globalThis.discardIncompleteUpload = discardIncompleteUpload;
+    globalThis.downloadFile = downloadFile;
+    globalThis.deleteFile = deleteFile;
 });
+
+async function initializeNetworkMonitoring() {
+    updateConnectionType();
+    startLatencyMonitoring();
+    startStatsUpdates();
+    updateNetworkDisplay();
+}
+
+function updateConnectionType() {
+    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (connection) {
+        networkStats.connectionType = connection.effectiveType || connection.type || 'unknown';
+    } else {
+        networkStats.connectionType = 'unknown';
+    }
+}
+
+async function measureLatency() {
+    const startTime = performance.now();
+    try {
+        await fetch('/api/ping', { 
+            method: 'HEAD',
+            cache: 'no-cache'
+        });
+        const latency = performance.now() - startTime;
+        networkStats.latency = Math.round(latency);
+        return latency;
+    } catch {
+        networkStats.latency = 0;
+        return 0;
+    }
+}
+
+function startLatencyMonitoring() {
+    measureLatency();
+    setInterval(measureLatency, LATENCY_CHECK_INTERVAL);
+}
+
+function startStatsUpdates() {
+    setInterval(updateNetworkDisplay, STATS_UPDATE_INTERVAL);
+}
+
+function updateNetworkDisplay() {
+    document.getElementById('connectionType').textContent = networkStats.connectionType.toUpperCase();
+    document.getElementById('latency').textContent = `${networkStats.latency} ms`;
+    document.getElementById('downloadSpeed').textContent = `${networkStats.downloadSpeed.toFixed(1)} Mbps`;
+    document.getElementById('uploadSpeed').textContent = `${networkStats.uploadSpeed.toFixed(1)} Mbps`;
+    document.getElementById('dataSent').textContent = formatFileSize(networkStats.dataSent);
+    document.getElementById('dataReceived').textContent = formatFileSize(networkStats.dataReceived);
+    
+    const statusElement = document.getElementById('connectionStatus');
+    const indicator = statusElement.querySelector('.status-indicator');
+    const statusText = statusElement.querySelector('span');
+    
+    let status = 'poor';
+    let statusMessage = 'Poor Connection';
+    
+    if (networkStats.latency > 0 && networkStats.latency < 50) {
+        status = 'excellent';
+        statusMessage = 'Excellent Connection';
+    } else if (networkStats.latency < 150) {
+        status = 'good';
+        statusMessage = 'Good Connection';
+    }
+    
+    indicator.className = `status-indicator ${status}`;
+    statusText.textContent = statusMessage;
+}
+
+function calculateTransferSpeed(filename, bytesTransferred, timeElapsed) {
+    if (!transferMetrics.has(filename)) {
+        transferMetrics.set(filename, {
+            startTime: Date.now(),
+            lastUpdate: Date.now(),
+            totalBytes: 0,
+            measurements: []
+        });
+    }
+    
+    const metrics = transferMetrics.get(filename);
+    const now = Date.now();
+    const deltaTime = now - metrics.lastUpdate;
+    const deltaBytes = bytesTransferred - metrics.totalBytes;
+    
+    if (deltaTime > 0) {
+        const speedBps = (deltaBytes / deltaTime) * 1000;
+        metrics.measurements.push({
+            time: now,
+            speed: speedBps
+        });
+        
+        metrics.measurements = metrics.measurements.filter(m => now - m.time < SPEED_CALCULATION_WINDOW);
+        
+        const avgSpeed = metrics.measurements.reduce((sum, m) => sum + m.speed, 0) / metrics.measurements.length;
+        
+        metrics.lastUpdate = now;
+        metrics.totalBytes = bytesTransferred;
+        
+        networkStats.uploadSpeed = (avgSpeed * 8) / (1024 * 1024);
+        
+        return avgSpeed;
+    }
+    
+    return 0;
+}
 
 async function checkForIncompleteUploads() {
     const savedSessions = JSON.parse(localStorage.getItem('uploadSessions') || '{}');
@@ -121,15 +239,24 @@ async function resumeUploadWithFile(filename, sessionData, file) {
         
         activeUploadSessions.set(filename, { ...sessionData, file });
         
+        transferMetrics.set(filename, {
+            startTime: Date.now(),
+            lastUpdate: Date.now(),
+            totalBytes: 0,
+            measurements: [],
+            lastTransferred: 0
+        });
+        
         const statusResponse = await fetch(`/api/upload-status?sessionId=${sessionData.sessionId}`);
         if (!statusResponse.ok) throw new Error('Failed to get upload status');
 
         const status = await statusResponse.json();
         const uploadedChunks = new Set(status.uploadedChunks);
         
-        const progressItem = createProgressItem(filename);
+        const progressItem = createProgressItem(filename, file.size);
         uploadProgress.style.display = 'block';
-        updateProgress(progressItem, status.progress);
+        const initialBytes = Math.round((status.progress / 100) * file.size);
+        updateProgress(progressItem, status.progress, initialBytes, file.size);
 
         for (let i = 0; i < sessionData.totalChunks; i++) {
             if (uploadedChunks.has(i)) continue;
@@ -146,7 +273,8 @@ async function resumeUploadWithFile(filename, sessionData, file) {
             if (!response.ok) throw new Error(`Chunk ${i} upload failed`);
             
             const result = await response.json();
-            updateProgress(progressItem, result.progress);
+            const bytesTransferred = Math.round((result.progress / 100) * file.size);
+            updateProgress(progressItem, result.progress, bytesTransferred, file.size);
             
             if (result.complete) break;
         }
@@ -159,6 +287,7 @@ async function resumeUploadWithFile(filename, sessionData, file) {
         
         setTimeout(() => {
             progressItem.remove();
+            transferMetrics.delete(filename);
             if (uploadProgress.children.length === 0) {
                 uploadProgress.style.display = 'none';
             }
@@ -170,6 +299,7 @@ async function resumeUploadWithFile(filename, sessionData, file) {
         console.error('Resume upload failed:', error);
         alert(`Failed to resume upload: ${error.message}`);
         activeUploadSessions.delete(filename);
+        transferMetrics.delete(filename);
     } finally {
         activeUploads--;
         processUploadQueue();
@@ -277,8 +407,16 @@ async function uploadFileSimple(file) {
     const formData = new FormData();
     formData.append('file', file);
     
-    const progressItem = createProgressItem(file.name);
+    const progressItem = createProgressItem(file.name, file.size);
     uploadProgress.style.display = 'block';
+    
+    transferMetrics.set(file.name, {
+        startTime: Date.now(),
+        lastUpdate: Date.now(),
+        totalBytes: 0,
+        measurements: [],
+        lastTransferred: 0
+    });
     
     try {
         const response = await fetch('/api/upload', {
@@ -288,9 +426,10 @@ async function uploadFileSimple(file) {
         
         if (!response.ok) throw new Error('Upload failed');
         
-        updateProgress(progressItem, 100);
+        updateProgress(progressItem, 100, file.size, file.size);
         setTimeout(() => {
             progressItem.remove();
+            transferMetrics.delete(file.name);
             if (uploadProgress.children.length === 0) {
                 uploadProgress.style.display = 'none';
             }
@@ -299,13 +438,22 @@ async function uploadFileSimple(file) {
         loadFiles();
     } catch (error) {
         progressItem.remove();
+        transferMetrics.delete(file.name);
         throw error;
     }
 }
 
 async function uploadFileChunked(file) {
-    const progressItem = createProgressItem(file.name);
+    const progressItem = createProgressItem(file.name, file.size);
     uploadProgress.style.display = 'block';
+    
+    transferMetrics.set(file.name, {
+        startTime: Date.now(),
+        lastUpdate: Date.now(),
+        totalBytes: 0,
+        measurements: [],
+        lastTransferred: 0
+    });
     
     try {
         const sessionResponse = await fetch('/api/upload-init', {
@@ -341,7 +489,8 @@ async function uploadFileChunked(file) {
             if (!response.ok) throw new Error(`Chunk ${i} upload failed`);
             
             const result = await response.json();
-            updateProgress(progressItem, result.progress);
+            const bytesTransferred = Math.round((result.progress / 100) * file.size);
+            updateProgress(progressItem, result.progress, bytesTransferred, file.size);
             
             if (result.complete) break;
         }
@@ -354,6 +503,7 @@ async function uploadFileChunked(file) {
         
         setTimeout(() => {
             progressItem.remove();
+            transferMetrics.delete(file.name);
             if (uploadProgress.children.length === 0) {
                 uploadProgress.style.display = 'none';
             }
@@ -362,6 +512,7 @@ async function uploadFileChunked(file) {
         loadFiles();
     } catch (error) {
         progressItem.remove();
+        transferMetrics.delete(file.name);
         activeUploadSessions.delete(file.name);
         throw error;
     }
@@ -420,25 +571,90 @@ async function resumeUpload(filename) {
     }
 }
 
-function createProgressItem(filename) {
+function createProgressItem(filename, totalSize = 0) {
     const item = document.createElement('div');
     item.className = 'progress-item';
+    item.dataset.filename = filename;
     item.innerHTML = `
-        <span class="filename">${filename}</span>
+        <div class="progress-header">
+            <span class="filename">${filename}</span>
+            <span class="transfer-stats">
+                <span class="transfer-speed">0 MB/s</span>
+                <span class="eta">ETA: --</span>
+            </span>
+        </div>
         <div class="progress-bar">
             <div class="progress-fill"></div>
         </div>
-        <span class="progress-text">0%</span>
+        <div class="progress-footer">
+            <span class="progress-text">0%</span>
+            <span class="transfer-details">
+                <span class="transferred">0 B</span> / <span class="total-size">${formatFileSize(totalSize)}</span>
+            </span>
+        </div>
     `;
     uploadProgress.appendChild(item);
     return item;
 }
 
-function updateProgress(progressItem, percent) {
+function updateProgress(progressItem, percent, bytesTransferred = 0, totalSize = 0) {
     const fill = progressItem.querySelector('.progress-fill');
     const text = progressItem.querySelector('.progress-text');
+    const transferredSpan = progressItem.querySelector('.transferred');
+    const totalSizeSpan = progressItem.querySelector('.total-size');
+    const speedSpan = progressItem.querySelector('.transfer-speed');
+    const etaSpan = progressItem.querySelector('.eta');
+    
     fill.style.width = `${percent}%`;
     text.textContent = `${Math.round(percent)}%`;
+    
+    if (transferredSpan && totalSize > 0) {
+        transferredSpan.textContent = formatFileSize(bytesTransferred);
+        if (totalSizeSpan && totalSizeSpan.textContent === '0 B') {
+            totalSizeSpan.textContent = formatFileSize(totalSize);
+        }
+    }
+    
+    const filename = progressItem.dataset.filename;
+    if (filename && transferMetrics.has(filename)) {
+        const metrics = transferMetrics.get(filename);
+        const now = Date.now();
+        const timeElapsed = (now - metrics.startTime) / 1000;
+        
+        if (timeElapsed > 0 && bytesTransferred > 0) {
+            const currentSpeed = calculateTransferSpeed(filename, bytesTransferred, timeElapsed);
+            const speedMBps = (currentSpeed / (1024 * 1024));
+            
+            if (speedSpan) {
+                speedSpan.textContent = `${speedMBps.toFixed(1)} MB/s`;
+            }
+            
+            if (etaSpan && currentSpeed > 0 && totalSize > bytesTransferred) {
+                const remainingBytes = totalSize - bytesTransferred;
+                const etaSeconds = remainingBytes / currentSpeed;
+                etaSpan.textContent = `ETA: ${formatTime(etaSeconds)}`;
+            } else if (etaSpan && percent >= 100) {
+                etaSpan.textContent = 'Complete';
+            }
+            
+            networkStats.dataSent += bytesTransferred - (metrics.lastTransferred || 0);
+            metrics.lastTransferred = bytesTransferred;
+        }
+    }
+}
+
+function formatTime(seconds) {
+    if (seconds < 60) {
+        return `${Math.round(seconds)}s`;
+    } else if (seconds < 3600) {
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = Math.round(seconds % 60);
+        return `${minutes}m ${remainingSeconds}s`;
+    } else {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        return `${hours}h ${minutes}m`;
+    }
 }
 
 async function loadFiles() {
