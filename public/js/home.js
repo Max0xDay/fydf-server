@@ -1,6 +1,6 @@
 const CHUNK_SIZE = 5 * 1024 * 1024;
 const MAX_CONCURRENT_UPLOADS = 3;
-const SPEED_CALCULATION_WINDOW = 5000;
+const MAX_CONCURRENT_CHUNKS_PER_FILE = 4;
 const LATENCY_CHECK_INTERVAL = 10000;
 const STATS_UPDATE_INTERVAL = 1000;
 
@@ -11,10 +11,11 @@ const currentUserSpan = document.getElementById('currentUser');
 const logoutBtn = document.getElementById('logoutBtn');
 const uploadProgress = document.getElementById('uploadProgress');
 
-let currentUser = null;
-let uploadQueue = [];
+const _currentUser = null;
+const uploadQueue = [];
 let activeUploads = 0;
-let activeUploadSessions = new Map();
+const activeUploadSessions = new Map();
+const uploadTasks = [];
 const networkStats = {
     latency: 0,
     bandwidth: 0,
@@ -23,13 +24,22 @@ const networkStats = {
     dataReceived: 0,
     connectionQuality: 'unknown'
 };
-let transferMetrics = new Map();
+const transferMetrics = new Map();
+
+const uploadSpeedStats = {
+    averageSpeed: 0,
+    speedHistory: [],
+    activeSessions: 0
+};
+
+let speedChart = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth();
     setupEventListeners();
     checkForIncompleteUploads();
     initializeNetworkMonitoring();
+    initializeUploadSpeedMonitoring();
     
     globalThis.promptForResumeFile = promptForResumeFile;
     globalThis.discardIncompleteUpload = discardIncompleteUpload;
@@ -46,28 +56,36 @@ function initializeNetworkMonitoring() {
 
 async function measureBandwidth() {
     try {
-        const testSize = 100 * 1024;
+        const testSize = 1024 * 1024;
         const testData = new Uint8Array(testSize);
         
-        const startTime = performance.now();
-        const response = await fetch('/api/ping', {
-            method: 'POST',
-            body: testData,
-            cache: 'no-cache'
-        });
-        
-        if (response.ok) {
-            const endTime = performance.now();
-            const duration = (endTime - startTime) / 1000;
-            const speedBps = testSize / duration;
-            const speedMbps = (speedBps * 8) / (1024 * 1024);
+        const measurements = [];
+        for (let i = 0; i < 3; i++) {
+            const startTime = performance.now();
+            const response = await fetch('/api/ping', {
+                method: 'POST',
+                body: testData,
+                cache: 'no-cache'
+            });
             
-            networkStats.bandwidth = speedMbps;
-            networkStats.dataReceived += testSize;
-            networkStats.dataSent += testSize;
+            if (response.ok) {
+                const endTime = performance.now();
+                const duration = (endTime - startTime) / 1000;
+                const speedBps = testSize / duration;
+                const speedMbps = (speedBps * 8) / (1024 * 1024);
+                measurements.push(speedMbps);
+            }
+            
+            if (i < 2) await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        if (measurements.length > 0) {
+            networkStats.bandwidth = Math.max(...measurements);
+            networkStats.dataReceived += testSize * measurements.length;
+            networkStats.dataSent += testSize * measurements.length;
         }
     } catch {
-        networkStats.bandwidth = 0;
+        networkStats.bandwidth = 1000;
     }
 }
 
@@ -104,7 +122,12 @@ function startStatsUpdates() {
 function updateNetworkDisplay() {
     document.getElementById('connectionQuality').textContent = getConnectionQuality();
     document.getElementById('latency').textContent = `${networkStats.latency} ms`;
-    document.getElementById('bandwidthTest').textContent = `${networkStats.bandwidth.toFixed(1)} Mbps`;
+    
+    const theoreticalMaxMBps = networkStats.bandwidth > 0 ? 
+        (networkStats.bandwidth * 1024 * 1024) / (8 * 1024 * 1024) : 0;
+    document.getElementById('bandwidthTest').textContent = 
+        `${networkStats.bandwidth.toFixed(1)} Mbps (max ${theoreticalMaxMBps.toFixed(0)} MB/s)`;
+    
     document.getElementById('uploadSpeed').textContent = `${networkStats.uploadSpeed.toFixed(1)} MB/s`;
     document.getElementById('dataSent').textContent = formatFileSize(networkStats.dataSent);
     document.getElementById('dataReceived').textContent = formatFileSize(networkStats.dataReceived);
@@ -147,35 +170,175 @@ function calculateTransferSpeed(filename, bytesTransferred, _timeElapsed) {
             startTime: Date.now(),
             lastUpdate: Date.now(),
             totalBytes: 0,
-            measurements: []
+            measurements: [],
+            lastMeasurementTime: Date.now()
         });
     }
     
     const metrics = transferMetrics.get(filename);
     const now = Date.now();
-    const deltaTime = now - metrics.lastUpdate;
+    const totalElapsedTime = (now - metrics.startTime) / 1000;
+    
+    const overallSpeedBps = totalElapsedTime > 0 ? bytesTransferred / totalElapsedTime : 0;
+    
+    const deltaTime = now - metrics.lastMeasurementTime;
     const deltaBytes = bytesTransferred - metrics.totalBytes;
     
-    if (deltaTime > 0) {
-        const speedBps = (deltaBytes / deltaTime) * 1000;
+    if (deltaTime >= 500 && deltaBytes > 0) {
+        const instantSpeedBps = (deltaBytes / deltaTime) * 1000;
         metrics.measurements.push({
             time: now,
-            speed: speedBps
+            speed: instantSpeedBps
         });
         
-        metrics.measurements = metrics.measurements.filter(m => now - m.time < SPEED_CALCULATION_WINDOW);
-        
-        const avgSpeed = metrics.measurements.reduce((sum, m) => sum + m.speed, 0) / metrics.measurements.length;
-        
-        metrics.lastUpdate = now;
+        metrics.lastMeasurementTime = now;
         metrics.totalBytes = bytesTransferred;
-        
-        networkStats.uploadSpeed = avgSpeed / (1024 * 1024);
-        
-        return avgSpeed;
     }
     
-    return 0;
+    metrics.measurements = metrics.measurements.filter(m => now - m.time < 10000);
+    
+    let recentAvgSpeed = 0;
+    if (metrics.measurements.length > 0) {
+        recentAvgSpeed = metrics.measurements.reduce((sum, m) => sum + m.speed, 0) / metrics.measurements.length;
+    }
+    
+    const weightedSpeed = (overallSpeedBps * 0.7) + (recentAvgSpeed * 0.3);
+    
+    networkStats.uploadSpeed = weightedSpeed / (1024 * 1024);
+    
+    addUploadSpeedPoint(weightedSpeed);
+    
+    return weightedSpeed;
+}
+
+function initializeUploadSpeedMonitoring() {
+    initializeSpeedChart();
+    setInterval(updateUploadSpeedStats, STATS_UPDATE_INTERVAL);
+    setInterval(cleanupOldSpeedData, 30000);
+    
+    globalThis.addEventListener('resize', () => {
+        if (speedChart) {
+            setTimeout(() => {
+                initializeSpeedChart();
+            }, 100);
+        }
+    });
+}
+
+function initializeSpeedChart() {
+    const canvas = document.getElementById('speedChart');
+    const ctx = canvas.getContext('2d');
+    
+    canvas.width = canvas.offsetWidth;
+    canvas.height = 200;
+    
+    speedChart = {
+        canvas: canvas,
+        ctx: ctx,
+        maxDataPoints: 60
+    };
+    
+    drawChart();
+}
+
+function addUploadSpeedPoint(speed) {
+    if (!speedChart) return;
+    
+    const now = Date.now();
+    uploadSpeedStats.speedHistory.push({
+        time: now,
+        speed: speed
+    });
+    
+    uploadSpeedStats.speedHistory = uploadSpeedStats.speedHistory.filter(
+        point => now - point.time < 60000
+    );
+    
+    calculateAverageUploadSpeed();
+    drawChart();
+}
+
+function drawChart() {
+    if (!speedChart || !uploadSpeedStats.speedHistory.length) {
+        const { ctx, canvas } = speedChart;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#f8f9fa';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = '#dadce0';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
+        
+        ctx.fillStyle = '#5f6368';
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Upload Speed Graph (No data yet)', canvas.width / 2, canvas.height / 2);
+        return;
+    }
+    
+    const { ctx, canvas } = speedChart;
+    const padding = 40;
+    const chartWidth = canvas.width - (padding * 2);
+    const chartHeight = canvas.height - (padding * 2);
+    
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.fillStyle = '#f8f9fa';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.strokeStyle = '#dadce0';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padding, padding, chartWidth, chartHeight);
+    
+    const maxSpeed = Math.max(...uploadSpeedStats.speedHistory.map(p => p.speed)) || 1;
+    const timeRange = 60000;
+    const now = Date.now();
+    
+    ctx.strokeStyle = '#1a73e8';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    
+    uploadSpeedStats.speedHistory.forEach((point, index) => {
+        const x = padding + ((now - point.time) / timeRange) * chartWidth;
+        const y = padding + chartHeight - ((point.speed / maxSpeed) * chartHeight);
+        
+        if (index === 0) {
+            ctx.moveTo(canvas.width - x + padding, y);
+        } else {
+            ctx.lineTo(canvas.width - x + padding, y);
+        }
+    });
+    
+    ctx.stroke();
+    
+    ctx.fillStyle = '#5f6368';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${(maxSpeed / (1024 * 1024)).toFixed(1)} MB/s`, canvas.width - 5, padding + 15);
+    ctx.fillText('0 MB/s', canvas.width - 5, canvas.height - padding + 15);
+    
+    ctx.textAlign = 'center';
+    ctx.fillText('Upload Speed Over Time (60s)', canvas.width / 2, 20);
+}
+
+function updateUploadSpeedStats() {
+    document.getElementById('avgUploadSpeed').textContent = `${uploadSpeedStats.averageSpeed.toFixed(1)} MB/s`;
+}
+
+function calculateAverageUploadSpeed() {
+    if (uploadSpeedStats.speedHistory.length === 0) {
+        uploadSpeedStats.averageSpeed = 0;
+        return;
+    }
+    
+    const totalSpeed = uploadSpeedStats.speedHistory.reduce((sum, point) => sum + point.speed, 0);
+    uploadSpeedStats.averageSpeed = (totalSpeed / uploadSpeedStats.speedHistory.length) / (1024 * 1024);
+}
+
+function cleanupOldSpeedData() {
+    const now = Date.now();
+    uploadSpeedStats.speedHistory = uploadSpeedStats.speedHistory.filter(
+        point => now - point.time < 300000
+    );
 }
 
 async function checkForIncompleteUploads() {
@@ -294,25 +457,32 @@ async function resumeUploadWithFile(filename, sessionData, file) {
         const initialBytes = Math.round((status.progress / 100) * file.size);
         updateProgress(progressItem, status.progress, initialBytes, file.size);
 
-        for (let i = 0; i < sessionData.totalChunks; i++) {
-            if (uploadedChunks.has(i)) continue;
-
-            const start = i * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, file.size);
-            const chunk = file.slice(start, end);
-            
-            const response = await fetch(`/api/upload-resumable?sessionId=${sessionData.sessionId}&chunkIndex=${i}`, {
-                method: 'POST',
-                body: chunk
-            });
-            
-            if (!response.ok) throw new Error(`Chunk ${i} upload failed`);
-            
-            const result = await response.json();
-            const bytesTransferred = Math.round((result.progress / 100) * file.size);
-            updateProgress(progressItem, result.progress, bytesTransferred, file.size);
-            
-            if (result.complete) break;
+        const uploadTask = {
+            file,
+            sessionId: sessionData.sessionId,
+            totalChunks: sessionData.totalChunks,
+            completedChunks: uploadedChunks,
+            activeChunks: new Set(),
+            nextChunkIndex: 0,
+            progressItem,
+            finished: false
+        };
+        
+        for (let i = 0; i < uploadTask.totalChunks; i++) {
+            if (!uploadedChunks.has(i)) {
+                uploadTask.nextChunkIndex = i;
+                break;
+            }
+        }
+        
+        uploadTasks.push(uploadTask);
+        
+        for (let i = 0; i < Math.min(MAX_CONCURRENT_CHUNKS_PER_FILE, uploadTask.totalChunks - uploadTask.completedChunks.size); i++) {
+            uploadNextChunk(uploadTask);
+        }
+        
+        while (!uploadTask.finished) {
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
 
         activeUploadSessions.delete(filename);
@@ -320,6 +490,11 @@ async function resumeUploadWithFile(filename, sessionData, file) {
         const savedSessions = JSON.parse(localStorage.getItem('uploadSessions') || '{}');
         delete savedSessions[filename];
         localStorage.setItem('uploadSessions', JSON.stringify(savedSessions));
+        
+        const taskIndex = uploadTasks.indexOf(uploadTask);
+        if (taskIndex > -1) {
+            uploadTasks.splice(taskIndex, 1);
+        }
         
         setTimeout(() => {
             progressItem.remove();
@@ -336,6 +511,11 @@ async function resumeUploadWithFile(filename, sessionData, file) {
         alert(`Failed to resume upload: ${error.message}`);
         activeUploadSessions.delete(filename);
         transferMetrics.delete(filename);
+        
+        const taskIndex = uploadTasks.findIndex(task => task.file.name === filename);
+        if (taskIndex > -1) {
+            uploadTasks.splice(taskIndex, 1);
+        }
     } finally {
         activeUploads--;
         processUploadQueue();
@@ -370,10 +550,10 @@ async function checkAuth() {
             loadFiles();
             currentUserSpan.textContent = 'User';
         } else {
-            window.location.href = '/login';
+            globalThis.location.href = '/login';
         }
-    } catch (error) {
-        window.location.href = '/login';
+    } catch (_error) {
+        globalThis.location.href = '/login';
     }
 }
 
@@ -382,10 +562,10 @@ async function handleLogout() {
         const response = await fetch('/api/logout', { method: 'POST' });
         const data = await response.json();
         
-        window.location.href = data.redirect || '/login';
+        globalThis.location.href = data.redirect || '/login';
     } catch (error) {
         console.error('Logout error:', error);
-        window.location.href = '/login';
+        globalThis.location.href = '/login';
     }
 }
 
@@ -512,23 +692,25 @@ async function uploadFileChunked(file) {
         savedSessions[file.name] = { sessionId, totalChunks };
         localStorage.setItem('uploadSessions', JSON.stringify(savedSessions));
 
-        for (let i = 0; i < totalChunks; i++) {
-            const start = i * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, file.size);
-            const chunk = file.slice(start, end);
-            
-            const response = await fetch(`/api/upload-resumable?sessionId=${sessionId}&chunkIndex=${i}`, {
-                method: 'POST',
-                body: chunk
-            });
-            
-            if (!response.ok) throw new Error(`Chunk ${i} upload failed`);
-            
-            const result = await response.json();
-            const bytesTransferred = Math.round((result.progress / 100) * file.size);
-            updateProgress(progressItem, result.progress, bytesTransferred, file.size);
-            
-            if (result.complete) break;
+        const uploadTask = {
+            file,
+            sessionId,
+            totalChunks,
+            completedChunks: new Set(),
+            activeChunks: new Set(),
+            nextChunkIndex: 0,
+            progressItem,
+            finished: false
+        };
+        
+        uploadTasks.push(uploadTask);
+        
+        for (let i = 0; i < Math.min(MAX_CONCURRENT_CHUNKS_PER_FILE, totalChunks); i++) {
+            uploadNextChunk(uploadTask);
+        }
+        
+        while (!uploadTask.finished) {
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
 
         activeUploadSessions.delete(file.name);
@@ -536,6 +718,11 @@ async function uploadFileChunked(file) {
         const completedSessions = JSON.parse(localStorage.getItem('uploadSessions') || '{}');
         delete completedSessions[file.name];
         localStorage.setItem('uploadSessions', JSON.stringify(completedSessions));
+        
+        const taskIndex = uploadTasks.indexOf(uploadTask);
+        if (taskIndex > -1) {
+            uploadTasks.splice(taskIndex, 1);
+        }
         
         setTimeout(() => {
             progressItem.remove();
@@ -550,60 +737,71 @@ async function uploadFileChunked(file) {
         progressItem.remove();
         transferMetrics.delete(file.name);
         activeUploadSessions.delete(file.name);
+        
+        const taskIndex = uploadTasks.findIndex(task => task.file.name === file.name);
+        if (taskIndex > -1) {
+            uploadTasks.splice(taskIndex, 1);
+        }
+        
         throw error;
     }
 }
 
-async function resumeUpload(filename) {
-    const session = activeUploadSessions.get(filename);
-    if (!session) return false;
-
-    try {
-        const statusResponse = await fetch(`/api/upload-status?sessionId=${session.sessionId}`);
-        if (!statusResponse.ok) return false;
-
-        const status = await statusResponse.json();
-        const uploadedChunks = new Set(status.uploadedChunks);
-        
-        const progressItem = createProgressItem(filename);
-        uploadProgress.style.display = 'block';
-        updateProgress(progressItem, status.progress);
-
-        for (let i = 0; i < session.totalChunks; i++) {
-            if (uploadedChunks.has(i)) continue;
-
-            const start = i * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, session.file.size);
-            const chunk = session.file.slice(start, end);
-            
-            const response = await fetch(`/api/upload-resumable?sessionId=${session.sessionId}&chunkIndex=${i}`, {
-                method: 'POST',
-                body: chunk
-            });
-            
-            if (!response.ok) throw new Error(`Chunk ${i} upload failed`);
-            
-            const result = await response.json();
-            updateProgress(progressItem, result.progress);
-            
-            if (result.complete) break;
+async function uploadNextChunk(uploadTask) {
+    if (uploadTask.finished) {
+        return;
+    }
+    
+    let chunkIndex = -1;
+    for (let i = uploadTask.nextChunkIndex; i < uploadTask.totalChunks; i++) {
+        if (!uploadTask.completedChunks.has(i) && !uploadTask.activeChunks.has(i)) {
+            chunkIndex = i;
+            uploadTask.nextChunkIndex = i + 1;
+            break;
         }
-
-        activeUploadSessions.delete(filename);
+    }
+    
+    if (chunkIndex === -1) {
+        return;
+    }
+    
+    uploadTask.activeChunks.add(chunkIndex);
+    
+    try {
+        const start = chunkIndex * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, uploadTask.file.size);
+        const chunk = uploadTask.file.slice(start, end);
+        
+        const response = await fetch(`/api/upload-resumable?sessionId=${uploadTask.sessionId}&chunkIndex=${chunkIndex}`, {
+            method: 'POST',
+            body: chunk
+        });
+        
+        if (!response.ok) throw new Error(`Chunk ${chunkIndex} upload failed`);
+        
+        const result = await response.json();
+        uploadTask.completedChunks.add(chunkIndex);
+        uploadTask.activeChunks.delete(chunkIndex);
+        
+        const bytesTransferred = Math.round((result.progress / 100) * uploadTask.file.size);
+        updateProgress(uploadTask.progressItem, result.progress, bytesTransferred, uploadTask.file.size);
+        
+        if (result.complete || uploadTask.completedChunks.size === uploadTask.totalChunks) {
+            uploadTask.finished = true;
+            return;
+        }
+        
+        uploadNextChunk(uploadTask);
+        
+    } catch (error) {
+        uploadTask.activeChunks.delete(chunkIndex);
+        console.error(`Failed to upload chunk ${chunkIndex}:`, error);
         
         setTimeout(() => {
-            progressItem.remove();
-            if (uploadProgress.children.length === 0) {
-                uploadProgress.style.display = 'none';
+            if (!uploadTask.finished) {
+                uploadNextChunk(uploadTask);
             }
         }, 1000);
-
-        loadFiles();
-        return true;
-    } catch (error) {
-        console.error('Resume upload failed:', error);
-        activeUploadSessions.delete(filename);
-        return false;
     }
 }
 
@@ -661,8 +859,15 @@ function updateProgress(progressItem, percent, bytesTransferred = 0, totalSize =
             const currentSpeed = calculateTransferSpeed(filename, bytesTransferred, timeElapsed);
             const speedMBps = (currentSpeed / (1024 * 1024));
             
+            const theoreticalMaxMBps = networkStats.bandwidth > 0 ? 
+                (networkStats.bandwidth * 1024 * 1024) / (8 * 1024 * 1024) : 
+                125;
+            
             if (speedSpan) {
-                speedSpan.textContent = `${speedMBps.toFixed(1)} MB/s`;
+                const efficiencyPercent = theoreticalMaxMBps > 0 ? 
+                    Math.min(100, (speedMBps / theoreticalMaxMBps) * 100) : 0;
+                
+                speedSpan.textContent = `${speedMBps.toFixed(1)} MB/s (${efficiencyPercent.toFixed(0)}% of ${theoreticalMaxMBps.toFixed(0)} MB/s max)`;
             }
             
             if (etaSpan && currentSpeed > 0 && totalSize > bytesTransferred) {
@@ -698,7 +903,7 @@ async function loadFiles() {
         const response = await fetch('/api/files');
         if (!response.ok) {
             if (response.status === 401) {
-                window.location.href = '/login';
+                globalThis.location.href = '/login';
                 return;
             }
             throw new Error('Failed to load files');
@@ -758,7 +963,7 @@ async function downloadFile(filename) {
         a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
-    } catch (error) {
+    } catch (_error) {
         alert('Download failed');
     }
 }
@@ -773,7 +978,7 @@ async function deleteFile(filename) {
         
         if (!response.ok) throw new Error('Delete failed');
         loadFiles();
-    } catch (error) {
+    } catch (_error) {
         alert('Delete failed');
     }
 }

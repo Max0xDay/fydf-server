@@ -35,7 +35,7 @@
                         <div class="stat-value" id="latency">-- ms</div>
                     </div>
                     <div class="stat-item">
-                        <div class="stat-label">Bandwidth Test</div>
+                        <div class="stat-label">Network Bandwidth</div>
                         <div class="stat-value" id="bandwidthTest">-- Mbps</div>
                     </div>
                     <div class="stat-item">
@@ -95,6 +95,15 @@
 
         <div class="files-section">
             <h2>Your Files</h2>
+            <div class="performance-stats">
+                <div class="stat-item">
+                    <div class="stat-label">Average Upload Speed</div>
+                    <div class="stat-value" id="avgUploadSpeed">-- MB/s</div>
+                </div>
+            </div>
+            <div class="graph-container">
+                <canvas id="speedChart" width="800" height="200"></canvas>
+            </div>
             <div id="filesList" class="files-list">
                 <div class="loading">Loading files...</div>
             </div>
